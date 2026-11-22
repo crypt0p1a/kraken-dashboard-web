@@ -39,8 +39,8 @@ X-Kraken-Push-Signature: sha256=<hex>        HMAC-SHA256(key, "<at>\n" + the bod
 ```
 
 A push not signed with the key is refused before it's read (401), one signed more than 5 minutes
-away from the clock of the backend too, and one taken already (409): a push heard on the way can't
-be sent again. **The page itself isn't protected yet**: whoever reaches the port reads the
+away from the clock of the backend too, and one signed at or before the last one taken (409): a
+push heard on the way can't be sent again, nor one held back to replace a newer one. **The page itself isn't protected yet**: whoever reaches the port reads the
 dashboard. Beyond this machine, only on a network of your own (a VPN such as WireGuard or
 Tailscale), never on the internet.
 

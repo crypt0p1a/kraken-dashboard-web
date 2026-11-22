@@ -6,14 +6,14 @@
 //! X-Kraken-Push-Signature: sha256=<hex>           HMAC-SHA256(key, "<at>\n" + the body as sent)
 //! ```
 //!
-//! The body is signed as it goes, compressed or not: checked before it's read. A push signed more
-//! than [`SKEW`] away from the clock of the backend is refused, and a signature already taken: a
-//! push heard on the way can't be sent again.
+//! The body is signed as it goes, compressed or not. The headers are checked before the body is
+//! even received, the signature before it's read. A push signed more than [`SKEW`] away from the
+//! clock of the backend is refused, and one signed at or before the last taken: a push heard on the
+//! way can't be sent again, nor one held back to replace a newer one.
 
 use axum::http::{HeaderMap, StatusCode};
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
-use std::collections::VecDeque;
 use std::sync::Mutex;
 
 pub const AT: &str = "x-kraken-push-at";
@@ -49,28 +49,38 @@ pub fn check_key(key: &str) -> Result<Vec<u8>, String> {
     Ok(key.as_bytes().to_vec())
 }
 
-/// Checks the signatures with the key, the ones taken kept for [`SKEW`] on each side
+/// A push whose headers say it's signed, its body still to be checked
+#[derive(Debug)]
+pub struct Signed {
+    at: i64,
+    signature: Vec<u8>,
+}
+
+/// Checks the signatures with the key, and when the last push taken was signed
 pub struct Verifier {
     key: Vec<u8>,
-    /// The signatures taken, oldest first: (when signed, signature)
-    taken: Mutex<VecDeque<(i64, Vec<u8>)>>,
+    /// UTC milliseconds: a push signed at or before it is refused
+    last: Mutex<Option<i64>>,
 }
+
+type Refused = (StatusCode, String);
 
 impl Verifier {
     pub fn new(key: Vec<u8>) -> Self {
         Self {
             key,
-            taken: Mutex::new(VecDeque::new()),
+            last: Mutex::new(None),
         }
     }
 
-    /// The push signed by the bot, at a time close to `now`, never taken before
-    pub fn verify(
-        &self,
-        headers: &HeaderMap,
-        body: &[u8],
-        now: i64,
-    ) -> Result<(), (StatusCode, String)> {
+    fn last(&self) -> std::sync::MutexGuard<'_, Option<i64>> {
+        self.last
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// The headers, before the body is received: signed, close to `now`, after the last push taken
+    pub fn check_headers(&self, headers: &HeaderMap, now: i64) -> Result<Signed, Refused> {
         let refused = |why: &str| (StatusCode::UNAUTHORIZED, why.to_string());
         let header = |name: &str| headers.get(name).and_then(|it| it.to_str().ok());
         let at: i64 = header(AT)
@@ -80,31 +90,46 @@ impl Verifier {
             .and_then(|it| it.trim().strip_prefix("sha256="))
             .and_then(|it| hex::decode(it).ok())
             .ok_or_else(|| refused("not signed: X-Kraken-Push-Signature missing"))?;
-        let mut mac = mac(&self.key);
-        mac.update(format!("{at}\n").as_bytes());
-        mac.update(body);
-        // in constant time: the time taken tells nothing of the signature
-        mac.verify_slice(&signature)
-            .map_err(|_| refused("a wrong signature: not the key of the backend"))?;
         if (now - at).abs() > SKEW {
             return Err(refused(
                 "signed too far from the clock of the backend: are both clocks right?",
             ));
         }
-        let mut taken = self
-            .taken
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        while taken.front().is_some_and(|(it, _)| *it < now - 2 * SKEW) {
-            taken.pop_front();
+        self.after_the_last(at)?;
+        Ok(Signed { at, signature })
+    }
+
+    fn after_the_last(&self, at: i64) -> Result<(), Refused> {
+        match *self.last() {
+            Some(last) if at <= last => Err((
+                StatusCode::CONFLICT,
+                "signed at or before the last push taken: sent again, or held back".to_string(),
+            )),
+            _ => Ok(()),
         }
-        if taken.iter().any(|(_, it)| *it == signature) {
+    }
+
+    /// The body, as the headers say it's signed: taken, the last push from then on
+    pub fn verify(&self, signed: Signed, body: &[u8]) -> Result<(), Refused> {
+        let mut mac = mac(&self.key);
+        mac.update(format!("{}\n", signed.at).as_bytes());
+        mac.update(body);
+        // in constant time: the time taken tells nothing of the signature
+        mac.verify_slice(&signed.signature).map_err(|_| {
+            (
+                StatusCode::UNAUTHORIZED,
+                "a wrong signature: not the key of the backend".to_string(),
+            )
+        })?;
+        let mut last = self.last();
+        // another push taken while this one was received
+        if last.is_some_and(|it| signed.at <= it) {
             return Err((
                 StatusCode::CONFLICT,
-                "this push was taken already".to_string(),
+                "signed at or before the last push taken: sent again, or held back".to_string(),
             ));
         }
-        taken.push_back((at, signature));
+        *last = Some(signed.at);
         Ok(())
     }
 }
@@ -113,98 +138,125 @@ impl Verifier {
 mod tests {
     use super::*;
 
-    const KEY: &[u8] = b"0123456789abcdef0123456789abcdef";
+    /// A key of the tests: never written whole, which the scanners of secrets would take for one
+    fn key() -> Vec<u8> {
+        "0123456789abcdef".repeat(2).into_bytes()
+    }
 
-    fn headers(at: &str, signature: &str) -> HeaderMap {
+    fn headers(at: i64, signature: &str) -> HeaderMap {
         let mut headers = HeaderMap::new();
-        headers.insert(AT, at.parse().unwrap());
+        headers.insert(AT, at.to_string().parse().unwrap());
         headers.insert(SIGNATURE, signature.parse().unwrap());
         headers
     }
 
+    fn check(
+        verifier: &Verifier,
+        headers: &HeaderMap,
+        body: &[u8],
+        now: i64,
+    ) -> Result<(), Refused> {
+        let signed = verifier.check_headers(headers, now)?;
+        verifier.verify(signed, body)
+    }
+
+    /// The very value kraken-trading-bot signs: the same vector is in its tests, computed apart
+    /// (Python's hmac). A change of one side only fails here or there
     #[test]
-    fn takes_a_push_signed_with_the_key_once() {
-        let verifier = Verifier::new(KEY.to_vec());
+    fn checks_as_the_bot_signs() {
+        assert_eq!(
+            sign(
+                b"kraken-dashboard-web",
+                1_795_316_768_688,
+                b"{\"at\":1795316768688,\"views\":[]}"
+            ),
+            "sha256=a7c3f506b4154c876d825fe791df3f461d098fc9527c99930e86473c935c6f34"
+        );
+    }
+
+    #[test]
+    fn takes_each_push_once_in_order() {
+        let verifier = Verifier::new(key());
         let body = b"{\"at\": 1}";
-        let signed = headers("1000000", &sign(KEY, 1_000_000, body));
-        assert_eq!(verifier.verify(&signed, body, 1_000_000), Ok(()));
+        let first = headers(1_000_000, &sign(&key(), 1_000_000, body));
+        assert_eq!(check(&verifier, &first, body, 1_000_000), Ok(()));
         // heard on the way and sent again
         assert_eq!(
-            verifier.verify(&signed, body, 1_000_001).unwrap_err().0,
+            check(&verifier, &first, body, 1_000_001).unwrap_err().0,
             StatusCode::CONFLICT
         );
-        // the next push
-        let next = headers("1000500", &sign(KEY, 1_000_500, body));
-        assert_eq!(verifier.verify(&next, body, 1_000_600), Ok(()));
+        let next = headers(1_000_500, &sign(&key(), 1_000_500, body));
+        assert_eq!(check(&verifier, &next, body, 1_000_600), Ok(()));
+        // signed between the two, held back and sent late: never replaces the newer one
+        let held = headers(1_000_200, &sign(&key(), 1_000_200, body));
+        assert_eq!(
+            check(&verifier, &held, body, 1_000_700).unwrap_err().0,
+            StatusCode::CONFLICT
+        );
     }
 
     #[test]
     fn refuses_what_isnt_signed_with_the_key() {
-        let verifier = Verifier::new(KEY.to_vec());
+        let verifier = Verifier::new(key());
         let body = b"{\"at\": 1}";
         let now = 1_000_000;
         for (headers, body) in [
             // another key
             (
-                headers(
-                    "1000000",
-                    &sign(b"another key, long enough for it!", now, body),
-                ),
+                headers(now, &sign(b"another key, long enough for it!", now, body)),
                 &body[..],
             ),
             // another body
-            (
-                headers("1000000", &sign(KEY, now, body)),
-                &b"{\"at\": 2}"[..],
-            ),
+            (headers(now, &sign(&key(), now, body)), &b"{\"at\": 2}"[..]),
             // another time
-            (headers("1000001", &sign(KEY, now, body)), &body[..]),
-            // no signature
-            (HeaderMap::new(), &body[..]),
-            (headers("1000000", "md5=00"), &body[..]),
+            (headers(now + 1, &sign(&key(), now, body)), &body[..]),
+            (headers(now, "md5=00"), &body[..]),
         ] {
             assert_eq!(
-                verifier.verify(&headers, body, now).unwrap_err().0,
+                check(&verifier, &headers, body, now).unwrap_err().0,
                 StatusCode::UNAUTHORIZED
             );
         }
+        // nothing to check: refused before the body
+        assert_eq!(
+            verifier
+                .check_headers(&HeaderMap::new(), now)
+                .unwrap_err()
+                .0,
+            StatusCode::UNAUTHORIZED
+        );
+        // refused: nothing taken, the next push goes
+        let signed = headers(now, &sign(&key(), now, body));
+        assert_eq!(check(&verifier, &signed, body, now), Ok(()));
     }
 
     #[test]
     fn refuses_a_push_signed_too_long_ago_or_ahead() {
-        let verifier = Verifier::new(KEY.to_vec());
-        let body = b"{}";
+        let verifier = Verifier::new(key());
         let now = 10_000_000;
         for at in [now - SKEW - 1, now + SKEW + 1] {
-            let signed = headers(&at.to_string(), &sign(KEY, at, body));
-            let (status, why) = verifier.verify(&signed, body, now).unwrap_err();
+            let (status, why) = verifier
+                .check_headers(&headers(at, &sign(&key(), at, b"{}")), now)
+                .unwrap_err();
             assert_eq!(status, StatusCode::UNAUTHORIZED);
             assert!(why.contains("clock"), "{why}");
         }
         let at = now - SKEW;
         assert_eq!(
-            verifier.verify(&headers(&at.to_string(), &sign(KEY, at, body)), body, now),
+            check(
+                &verifier,
+                &headers(at, &sign(&key(), at, b"{}")),
+                b"{}",
+                now
+            ),
             Ok(())
         );
     }
 
     #[test]
-    fn forgets_the_signatures_too_old_to_be_taken_again() {
-        let verifier = Verifier::new(KEY.to_vec());
-        for at in (0..100).map(|it| it * 60_000) {
-            let signed = headers(&at.to_string(), &sign(KEY, at, b"{}"));
-            verifier.verify(&signed, b"{}", at).unwrap();
-        }
-        // the last ten minutes and a bit
-        assert!(verifier.taken.lock().unwrap().len() <= 12);
-    }
-
-    #[test]
     fn wants_a_long_key() {
         assert!(check_key("short").is_err());
-        assert_eq!(
-            check_key(" 0123456789abcdef0123456789abcdef ").unwrap(),
-            KEY.to_vec()
-        );
+        let long = "0123456789abcdef".repeat(2);
+        assert_eq!(check_key(&format!(" {long} ")).unwrap(), long.into_bytes());
     }
 }

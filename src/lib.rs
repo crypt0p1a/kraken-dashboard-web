@@ -234,11 +234,31 @@ fn encoding(headers: &HeaderMap) -> Result<Encoding, String> {
     }
 }
 
-/// The bot: replaces everything shown, its signature checked first
-async fn push(State(shared): State<Shared>, headers: HeaderMap, body: Bytes) -> Response {
-    if let Err(refused) = shared.signatures.verify(&headers, &body, now_millis()) {
+/// The bot: replaces everything shown. Its headers checked before its body is received, its
+/// signature before it's read
+async fn push(State(shared): State<Shared>, request: axum::extract::Request) -> Response {
+    let refused = |refused: (StatusCode, String)| {
         tracing::warn!(why = %refused.1, "a push refused");
-        return refused.into_response();
+        refused.into_response()
+    };
+    let (parts, body) = request.into_parts();
+    let headers = parts.headers;
+    let signed = match shared.signatures.check_headers(&headers, now_millis()) {
+        Ok(signed) => signed,
+        Err(error) => return refused(error),
+    };
+    let body = match axum::body::to_bytes(body, MAX_PUSH).await {
+        Ok(body) => body,
+        Err(_) => {
+            return (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                format!("larger than {MAX_PUSH} bytes"),
+            )
+                .into_response();
+        }
+    };
+    if let Err(error) = shared.signatures.verify(signed, &body) {
+        return refused(error);
     }
     let _turn = shared.pushing.lock().await;
     let encoding = match encoding(&headers) {

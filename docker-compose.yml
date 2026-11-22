@@ -15,10 +15,8 @@ services:
     image: kraken-dashboard-web
     container_name: kraken-dashboard-web
     restart: unless-stopped
-    # KRAKEN_DASHBOARD_WEB_PUSH_KEY
-    env_file:
-      - path: .env
-        required: false
+    # KRAKEN_DASHBOARD_WEB_PUSH_KEY: without .env, docker compose says so
+    env_file: .env
     environment:
       RUST_LOG: info
     ports:
