@@ -1092,7 +1092,7 @@ dependencies = [
 [[package]]
 name = "kraken-dashboard"
 version = "0.1.0"
-source = "git+https://github.com/crypt0p1a/kraken-trading-bot?rev=94df5c0ed2cb471edf533a36f2f909ee37c5b107#94df5c0ed2cb471edf533a36f2f909ee37c5b107"
+source = "git+https://github.com/crypt0p1a/kraken-trading-bot?rev=d29aab22a3a892fe0eab0dd8616465a45fcaad6d#d29aab22a3a892fe0eab0dd8616465a45fcaad6d"
 dependencies = [
  "kraken-dashboard-data",
  "ratatui",
@@ -1105,7 +1105,7 @@ dependencies = [
 [[package]]
 name = "kraken-dashboard-data"
 version = "0.1.0"
-source = "git+https://github.com/crypt0p1a/kraken-trading-bot?rev=94df5c0ed2cb471edf533a36f2f909ee37c5b107#94df5c0ed2cb471edf533a36f2f909ee37c5b107"
+source = "git+https://github.com/crypt0p1a/kraken-trading-bot?rev=d29aab22a3a892fe0eab0dd8616465a45fcaad6d#d29aab22a3a892fe0eab0dd8616465a45fcaad6d"
 dependencies = [
  "rust_decimal",
  "serde",

@@ -18,15 +18,21 @@
       body {
         /* the monospace fonts of a terminal, braille included for the charts */
         font-family: Menlo, Monaco, Consolas, "DejaVu Sans Mono", "Liberation Mono", monospace;
-        /* 14px, smaller when the screen is: the dashboard wants 100 by 28 cells at least, as a
-           terminal. A cell is 0.6em wide and 1.18em high: 100 cells in 62em, 28 in 34em. A phone
-           gets about 6px, read zoomed in */
-        font-size: 14px;
-        font-size: min(14px, calc(100vw / 62), calc(100vh / 34));
-        font-size: min(14px, calc(100vw / 62), calc(100dvh / 34));
+        /* a phone, or a window as small: a font to read, and the dashboard shows the portfolio
+           and its charts only, under 100 by 28 cells */
+        font-size: 13px;
         /* never enlarged by the browser of a phone, in landscape: the cells as measured */
         -webkit-text-size-adjust: 100%;
         text-size-adjust: 100%;
+      }
+      /* a tablet, a computer: the desk, the font smaller when the screen is so that 100 by 28
+         cells fit. A cell is 0.6em wide and 1.18em high: 100 cells in 62em, 28 in 34em */
+      @media (min-width: 600px) and (min-height: 600px) {
+        body {
+          font-size: 14px;
+          font-size: min(14px, calc(100vw / 62), calc(100vh / 34));
+          font-size: min(14px, calc(100vw / 62), calc(100dvh / 34));
+        }
       }
       pre {
         font-family: inherit;
