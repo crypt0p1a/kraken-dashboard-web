@@ -4,7 +4,7 @@
 //!
 //! | Route | From | What |
 //! |-------|------|------|
-//! | `PUT /state` | the bot | [`Push`]: every screen, JSON, compressed with gzip or not |
+//! | `PUT /state` | the bot | [`Push`]: every screen, JSON, compressed with gzip or not, [signed](signature) |
 //! | `GET /version` | a reader | [`Version`]: changes at each push, and from a run to the next |
 //! | `GET /data?range=day&account=2` | a reader | the data of a screen, as the bot pushed it; no `account`: all of them added up |
 //! | `GET /` | a browser | the page: the dashboard as the terminal shows it, reading the routes above |
@@ -13,8 +13,7 @@
 //! business of the bot and of the dashboard. Nothing is kept on disk: started again, the backend
 //! has nothing until the next push of the bot.
 //!
-//! Nothing is authenticated yet: whoever reaches the port can replace what's shown. Reach it on a
-//! network of your own only.
+//! The pushes are signed with a key only the bot and the backend know ([`signature`]).
 //!
 //! [kraken-trading-bot]: https://github.com/crypt0p1a/kraken-trading-bot
 
@@ -33,6 +32,8 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
+
+pub mod signature;
 
 pub const STATE: &str = "/state";
 pub const VERSION: &str = "/version";
@@ -92,12 +93,15 @@ pub struct Shared {
     /// The pushes one after the other, in the order they came: one the bot gave up on, come first,
     /// never replaces the next
     pushing: Arc<tokio::sync::Mutex<()>>,
+    /// Checks the signatures of the pushes
+    signatures: Arc<signature::Verifier>,
 }
 
 impl Shared {
-    /// Nothing pushed yet, the version starting from `start`
-    pub fn new(start: u64) -> Self {
+    /// Nothing pushed yet, the version starting from `start`, the pushes signed with `push_key`
+    pub fn new(start: u64, push_key: Vec<u8>) -> Self {
         Self {
+            signatures: Arc::new(signature::Verifier::new(push_key)),
             stored: Arc::new(Mutex::new(Stored {
                 version: start,
                 pushed_at: None,
@@ -115,14 +119,26 @@ impl Shared {
     }
 }
 
-/// The routes and the page in `assets`, the version starting from now
-pub fn router(assets: Option<&Path>) -> Router {
-    let now = std::time::SystemTime::now()
+/// What the backend is started with
+pub struct Config {
+    /// The key the bot signs its pushes with
+    pub push_key: Vec<u8>,
+    /// Where the page is (front/dist): the routes only without it
+    pub page: Option<std::path::PathBuf>,
+}
+
+/// UTC milliseconds
+pub fn now_millis() -> i64 {
+    std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |it| it.as_millis() as u64);
-    let router = router_with(Shared::new(now));
-    match assets {
-        Some(assets) => with_page(router, assets),
+        .map_or(0, |it| it.as_millis() as i64)
+}
+
+/// The routes and the page, the version starting from now
+pub fn router(config: Config) -> Router {
+    let router = router_with(Shared::new(now_millis() as u64, config.push_key));
+    match &config.page {
+        Some(page) => with_page(router, page),
         None => router,
     }
 }
@@ -143,13 +159,13 @@ pub fn router_with(shared: Shared) -> Router {
         .with_state(shared)
 }
 
-/// Serves until `shutdown`, the page from `assets`
+/// Serves until `shutdown`
 pub async fn serve(
     listener: tokio::net::TcpListener,
-    assets: Option<&Path>,
+    config: Config,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> std::io::Result<()> {
-    axum::serve(listener, router(assets))
+    axum::serve(listener, router(config))
         .with_graceful_shutdown(shutdown)
         .await
 }
@@ -199,8 +215,12 @@ fn encoding(headers: &HeaderMap) -> Result<Encoding, String> {
     }
 }
 
-/// The bot: replaces everything shown
+/// The bot: replaces everything shown, its signature checked first
 async fn push(State(shared): State<Shared>, headers: HeaderMap, body: Bytes) -> Response {
+    if let Err(refused) = shared.signatures.verify(&headers, &body, now_millis()) {
+        tracing::warn!(why = %refused.1, "a push refused");
+        return refused.into_response();
+    }
     let _turn = shared.pushing.lock().await;
     let encoding = match encoding(&headers) {
         Ok(encoding) => encoding,

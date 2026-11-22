@@ -9,6 +9,9 @@
 //!
 //! The page is served from KRAKEN_DASHBOARD_WEB_PAGE, else ./front/dist (built by
 //! `trunk build --release` in front/): without it, the routes only.
+//!
+//! KRAKEN_DASHBOARD_WEB_PUSH_KEY, required: the key the bot signs its pushes with, its
+//! KRAKEN_BOT_PUSH_KEY. 32 characters at least: `openssl rand -hex 32`.
 
 use std::process::ExitCode;
 use tracing_subscriber::EnvFilter;
@@ -60,6 +63,15 @@ async fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let push_key = match kraken_dashboard_web::signature::check_key(
+        &std::env::var("KRAKEN_DASHBOARD_WEB_PUSH_KEY").unwrap_or_default(),
+    ) {
+        Ok(key) => key,
+        Err(error) => {
+            eprintln!("kraken-dashboard-web: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
     let page = std::env::var_os("KRAKEN_DASHBOARD_WEB_PAGE")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::path::PathBuf::from("front/dist"));
@@ -70,7 +82,8 @@ async fn main() -> ExitCode {
         tracing::warn!(%address, page = %page.display(), "listening, without the page: built by trunk build --release in front/");
         None
     };
-    match kraken_dashboard_web::serve(listener, page.as_deref(), shutdown()).await {
+    let config = kraken_dashboard_web::Config { push_key, page };
+    match kraken_dashboard_web::serve(listener, config, shutdown()).await {
         Ok(()) => {
             tracing::info!("stopped");
             ExitCode::SUCCESS

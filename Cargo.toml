@@ -18,6 +18,10 @@ publish = false
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
 # the pushes come compressed, the screens are kept and served so
 flate2 = "1.1"
+# the pushes of the bot, signed: HMAC-SHA256
+hex = "0.4"
+hmac = "0.12"
+sha2 = "0.10"
 serde = { version = "1.0", features = ["derive"] }
 # raw_value: the data of a screen is kept as the bot wrote it, never read
 serde_json = { version = "1.0", features = ["raw_value"] }

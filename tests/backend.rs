@@ -1,14 +1,31 @@
 //! The routes of the backend, over HTTP on a port of its own
 
-use kraken_dashboard_web::{Shared, Version, gunzip, gzip};
+use kraken_dashboard_web::signature::{self, sign};
+use kraken_dashboard_web::{Config, Shared, Version, gunzip, gzip};
 use reqwest::StatusCode;
 use serde_json::{Value, json};
+use std::sync::atomic::{AtomicI64, Ordering};
+
+/// The key the bot and the backend of the tests share
+const KEY: &[u8] = b"0123456789abcdef0123456789abcdef";
+
+/// A push signed as the bot signs it, at a time of its own: two of the same body are two pushes
+fn put_state(url: &str, body: Vec<u8>) -> reqwest::RequestBuilder {
+    static LATER: AtomicI64 = AtomicI64::new(0);
+    let at = kraken_dashboard_web::now_millis() + LATER.fetch_add(1, Ordering::SeqCst);
+    reqwest::Client::new()
+        .put(format!("{url}/state"))
+        .header("content-type", "application/json")
+        .header(signature::AT, at.to_string())
+        .header(signature::SIGNATURE, sign(KEY, at, &body))
+        .body(body)
+}
 
 /// The backend on a free port (0: the system picks it), its version starting from `start`
 async fn backend_from(start: u64) -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    let router = kraken_dashboard_web::router_with(Shared::new(start));
+    let router = kraken_dashboard_web::router_with(Shared::new(start, KEY.to_vec()));
     tokio::spawn(async move { axum::serve(listener, router).await });
     format!("http://{address}")
 }
@@ -70,15 +87,17 @@ async fn keeps_the_last_push_of_the_bot() {
             .contains("KRAKEN_BOT_PUSH_URL")
     );
 
-    let response = client
-        .put(format!("{url}/state"))
-        .json(&push(
+    let response = put_state(
+        &url,
+        serde_json::to_vec(&push(
             5,
             &[("day", None, 10), ("day", Some(2), 20), ("week", None, 30)],
         ))
-        .send()
-        .await
-        .unwrap();
+        .unwrap(),
+    )
+    .send()
+    .await
+    .unwrap();
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
     assert_eq!(
         version(&client, &url).await,
@@ -114,12 +133,13 @@ async fn keeps_the_last_push_of_the_bot() {
     assert!(response.text().await.unwrap().contains("account 3"));
 
     // a push replaces everything, whatever the clock of the bot says
-    client
-        .put(format!("{url}/state"))
-        .json(&push(1, &[("hour", None, 40)]))
-        .send()
-        .await
-        .unwrap();
+    put_state(
+        &url,
+        serde_json::to_vec(&push(1, &[("hour", None, 40)])).unwrap(),
+    )
+    .send()
+    .await
+    .unwrap();
     assert_eq!(version(&client, &url).await.version, 102);
     let response = client
         .get(format!("{url}/data?range=day"))
@@ -143,10 +163,7 @@ async fn takes_and_serves_gzip() {
         // not gzip, though it says so
         (Some("gzip"), json.clone(), StatusCode::BAD_REQUEST),
     ] {
-        let mut request = reqwest::Client::new()
-            .put(format!("{url}/state"))
-            .header("content-type", "application/json")
-            .body(body);
+        let mut request = put_state(&url, body);
         if let Some(encoding) = encoding {
             request = request.header("content-encoding", encoding);
         }
@@ -185,10 +202,7 @@ async fn refuses_what_isnt_a_push() {
     let url = backend().await;
     let client = reqwest::Client::new();
     for body in ["{\"views\": 3}", "{\"at\": 1}", "not json"] {
-        let response = client
-            .put(format!("{url}/state"))
-            .header("content-type", "application/json")
-            .body(body)
+        let response = put_state(&url, body.as_bytes().to_vec())
             .send()
             .await
             .unwrap();
@@ -209,13 +223,7 @@ async fn takes_a_large_push() {
         (0..40_000).map(|it| ("day", Some(it), it)).collect();
     let json = serde_json::to_vec(&push(1, &large)).unwrap();
     assert!(json.len() > 2 * 1024 * 1024);
-    let response = reqwest::Client::new()
-        .put(format!("{url}/state"))
-        .header("content-type", "application/json")
-        .body(json)
-        .send()
-        .await
-        .unwrap();
+    let response = put_state(&url, json).send().await.unwrap();
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
 }
 
@@ -227,7 +235,10 @@ async fn never_has_the_same_version_from_a_run_to_the_next() {
     let address = listener.local_addr().unwrap();
     tokio::spawn(kraken_dashboard_web::serve(
         listener,
-        None,
+        Config {
+            push_key: KEY.to_vec(),
+            page: None,
+        },
         std::future::pending(),
     ));
     let now = std::time::SystemTime::now()
@@ -249,7 +260,7 @@ async fn serves_the_page() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     let router = kraken_dashboard_web::with_page(
-        kraken_dashboard_web::router_with(Shared::new(100)),
+        kraken_dashboard_web::router_with(Shared::new(100, KEY.to_vec())),
         &folder,
     );
     tokio::spawn(async move { axum::serve(listener, router).await });
@@ -287,4 +298,43 @@ async fn serves_the_page() {
         StatusCode::NOT_FOUND
     );
     std::fs::remove_dir_all(folder).unwrap();
+}
+
+/// Only the bot pushes: a push not signed with the key, or heard on the way and sent again, is
+/// refused before it's read
+#[tokio::test]
+async fn takes_the_pushes_of_the_bot_only() {
+    let url = backend().await;
+    let client = reqwest::Client::new();
+    let body = serde_json::to_vec(&push(1, &[("day", None, 10)])).unwrap();
+    let at = kraken_dashboard_web::now_millis();
+    for (signature, why) in [
+        (None, "not signed"),
+        (
+            Some(sign(b"a key which isn't the one of the bot", at, &body)),
+            "wrong signature",
+        ),
+    ] {
+        let mut request = client
+            .put(format!("{url}/state"))
+            .header("content-type", "application/json")
+            .header(signature::AT, at.to_string())
+            .body(body.clone());
+        if let Some(signature) = signature {
+            request = request.header(signature::SIGNATURE, signature);
+        }
+        let response = request.send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert!(response.text().await.unwrap().contains(why));
+    }
+    assert_eq!(version(&client, &url).await.pushed_at, None);
+
+    let signed = put_state(&url, body);
+    let again = signed.try_clone().unwrap();
+    assert_eq!(
+        signed.send().await.unwrap().status(),
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(again.send().await.unwrap().status(), StatusCode::CONFLICT);
+    assert_eq!(version(&client, &url).await.version, 101);
 }

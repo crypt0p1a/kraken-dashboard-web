@@ -46,7 +46,8 @@ jobs:
         run: docker build -t kraken-dashboard-web:ci .
       - name: Answers on its port, and serves its page
         run: |
-          docker run -d --rm --name backend -p 127.0.0.1:8080:8080 kraken-dashboard-web:ci
+          docker run -d --rm --name backend -p 127.0.0.1:8080:8080 \
+            -e KRAKEN_DASHBOARD_WEB_PUSH_KEY="$(openssl rand -hex 32)" kraken-dashboard-web:ci
           for attempt in $(seq 1 30); do
             curl -sf http://127.0.0.1:8080/version && break
             sleep 1
@@ -56,4 +57,14 @@ jobs:
           wasm=$(echo "$page" | grep -oE 'kraken-dashboard-web-front-[0-9a-f]+_bg\.wasm' | head -1)
           test -n "$wasm"
           curl -sf -o /dev/null -w '%{content_type}\n' "http://127.0.0.1:8080/$wasm" | grep -q application/wasm
+          # a push not signed with its key: refused
+          test "$(curl -s -o /dev/null -w '%{http_code}' -X PUT -H 'content-type: application/json' \
+            -d '{"at":1,"views":[]}' http://127.0.0.1:8080/state)" = 401
           docker stop backend
+      - name: Refuses to start without its key
+        run: |
+          set +e
+          output=$(docker run --rm kraken-dashboard-web:ci 2>&1)
+          code=$?
+          echo "$output"
+          test "$code" -eq 1 && echo "$output" | grep -q "KRAKEN_DASHBOARD_WEB_PUSH_KEY"

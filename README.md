@@ -19,21 +19,33 @@ Read only: nothing goes back to the bot, a tick is asked for from the dashboard 
 ## Running it
 
 ```sh
+cp .env.example .env    # KRAKEN_DASHBOARD_WEB_PUSH_KEY: openssl rand -hex 32
 docker compose up -d --build
 docker compose logs -f
 ```
 
-Then, in the `.env` of the bot: `KRAKEN_BOT_PUSH_URL=http://this-machine:8080`. The bot pushes as
-soon as it starts, then at the end of each tick.
+Then, in the `.env` of the bot: `KRAKEN_BOT_PUSH_URL=http://this-machine:8080`, and
+`KRAKEN_BOT_PUSH_KEY`, the same key. The bot pushes as soon as it starts, then at the end of each
+tick.
 
 `KRAKEN_DASHBOARD_WEB_PUBLISH` is where the port is published on the machine, `127.0.0.1:8080` by
 default: this machine only.
 
-**Nothing is authenticated yet**: whoever reaches the port can replace what's shown. Beyond this
-machine, only on a network of your own (a VPN such as WireGuard or Tailscale), never on the
-internet.
+**The pushes are signed**: HMAC-SHA256 with a key only the bot and the backend know, never sent.
 
-Without Docker, the page first, then the backend serving it:
+```text
+X-Kraken-Push-At: 1795316768688              when the bot signed, UTC milliseconds
+X-Kraken-Push-Signature: sha256=<hex>        HMAC-SHA256(key, "<at>\n" + the body as sent)
+```
+
+A push not signed with the key is refused before it's read (401), one signed more than 5 minutes
+away from the clock of the backend too, and one taken already (409): a push heard on the way can't
+be sent again. **The page itself isn't protected yet**: whoever reaches the port reads the
+dashboard. Beyond this machine, only on a network of your own (a VPN such as WireGuard or
+Tailscale), never on the internet.
+
+Without Docker, the page first, then the backend serving it, `KRAKEN_DASHBOARD_WEB_PUSH_KEY` in
+its environment:
 
 ```sh
 rustup target add wasm32-unknown-unknown
@@ -52,7 +64,7 @@ kraken-trading-bot ── PUT /state (gzip, at each tick) ──▶ kraken-dashb
 
 | Route | From | What |
 |-------|------|------|
-| `PUT /state` | the bot | every screen: `{"at": 1795316768688, "views": [{"range": "day", "account": null, "data": {…}}]}`, compressed or not (`Content-Encoding: gzip`), the pushes taken one after the other in the order they come |
+| `PUT /state` | the bot | every screen: `{"at": 1795316768688, "views": [{"range": "day", "account": null, "data": {…}}]}`, compressed or not (`Content-Encoding: gzip`), signed, the pushes taken one after the other in the order they come |
 | `GET /version` | a reader | `{"version": …, "pushed_at": …}`: the version changes at each push, and from a run to the next |
 | `GET /data?range=day&account=2` | a reader | the data of a screen as the bot pushed it, gzip to whoever accepts it; no `account`: all of them added up |
 | `GET /` | a browser | the page, compressed: the dashboard reading the routes above, a screen at a time, when the bot pushed or a key changes what's shown |
