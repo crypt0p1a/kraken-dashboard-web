@@ -1,0 +1,24 @@
+[package]
+name = "kraken-dashboard-web"
+description = "The web backend of kraken-trading-bot: keeps what the bot pushes at each tick, for its dashboard on the web"
+version = "0.1.0"
+edition = "2024"
+# as kraken-trading-bot
+rust-version = "1.89"
+license = "MIT"
+repository = "https://github.com/crypt0p1a/kraken-dashboard-web"
+publish = false
+
+[dependencies]
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
+# the pushes come compressed, the screens are kept and served so
+flate2 = "1.1"
+serde = { version = "1.0", features = ["derive"] }
+# raw_value: the data of a screen is kept as the bot wrote it, never read
+serde_json = { version = "1.0", features = ["raw_value"] }
+tokio = { version = "1", default-features = false, features = ["macros", "net", "rt-multi-thread", "signal", "sync"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["gzip", "json"] }
