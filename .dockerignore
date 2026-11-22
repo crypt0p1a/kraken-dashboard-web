@@ -1,0 +1,4 @@
+/target
+/front/dist
+.git
+.env

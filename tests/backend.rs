@@ -227,6 +227,7 @@ async fn never_has_the_same_version_from_a_run_to_the_next() {
     let address = listener.local_addr().unwrap();
     tokio::spawn(kraken_dashboard_web::serve(
         listener,
+        None,
         std::future::pending(),
     ));
     let now = std::time::SystemTime::now()
@@ -235,4 +236,55 @@ async fn never_has_the_same_version_from_a_run_to_the_next() {
         .as_millis() as u64;
     let started = version(&client, &format!("http://{address}")).await.version;
     assert!(started.abs_diff(now) < 60_000, "{started} {now}");
+}
+
+/// The page, from its folder, compressed for whoever accepts it; the routes before it
+#[tokio::test]
+async fn serves_the_page() {
+    let folder =
+        std::env::temp_dir().join(format!("kraken-dashboard-web-page-{}", std::process::id()));
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(folder.join("index.html"), "<html>the desk".repeat(100)).unwrap();
+    std::fs::write(folder.join("front.wasm"), b"\0asm").unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let router = kraken_dashboard_web::with_page(
+        kraken_dashboard_web::router_with(Shared::new(100)),
+        &folder,
+    );
+    tokio::spawn(async move { axum::serve(listener, router).await });
+
+    let raw = reqwest::Client::builder().no_gzip().build().unwrap();
+    let response = raw
+        .get(format!("{url}/"))
+        .header("accept-encoding", "gzip")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-encoding"], "gzip");
+    let text = reqwest::get(format!("{url}/"))
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    assert!(text.starts_with("<html>the desk"));
+    assert_eq!(
+        reqwest::get(format!("{url}/front.wasm"))
+            .await
+            .unwrap()
+            .headers()["content-type"],
+        "application/wasm"
+    );
+    // the routes first
+    assert_eq!(version(&reqwest::Client::new(), &url).await.version, 100);
+    assert_eq!(
+        reqwest::get(format!("{url}/nothing"))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    std::fs::remove_dir_all(folder).unwrap();
 }

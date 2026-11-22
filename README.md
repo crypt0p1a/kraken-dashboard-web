@@ -8,10 +8,13 @@
 
 The bot keeps everything in its SQLite database, and its dashboard in the terminal reads it on the
 machine of the bot. To follow the bot from elsewhere, the bot pushes, at the end of each tick,
-every screen its dashboard can show to this backend, which keeps the last push in memory.
+every screen its dashboard can show to this backend, which keeps the last push in memory and
+serves **the same dashboard in a web page**: http://127.0.0.1:8080/.
 
-**For now, the backend only receives**: the web interface, a dashboard like the one of the
-terminal, comes next. Read only: nothing goes back to the bot.
+The page runs the dashboard of the terminal itself, its screen and its logic compiled to
+WebAssembly and drawn by [ratzilla](https://github.com/ratatui/ratzilla) (ratatui in the browser):
+the same panels, the same charts, the same keys (`d`, `1`…`5`, `a`, `⏎`, `tab`, the arrows, `?`).
+Read only: nothing goes back to the bot, a tick is asked for from the dashboard of the terminal.
 
 ## Running it
 
@@ -30,8 +33,16 @@ default: this machine only.
 machine, only on a network of your own (a VPN such as WireGuard or Tailscale), never on the
 internet.
 
-Without Docker: `cargo run --release` (`--listen ADDRESS`, or `KRAKEN_DASHBOARD_WEB_LISTEN`,
-`127.0.0.1:8080` by default).
+Without Docker, the page first, then the backend serving it:
+
+```sh
+rustup target add wasm32-unknown-unknown
+cargo install --locked trunk --version "~0.21"
+(cd front && trunk build --release)   # front/dist
+cargo run --release                   # --listen ADDRESS, KRAKEN_DASHBOARD_WEB_LISTEN, 127.0.0.1:8080 by default
+```
+
+The page is served from `KRAKEN_DASHBOARD_WEB_PAGE`, else `front/dist`; without it, the routes only.
 
 ## What the bot pushes
 
@@ -44,6 +55,7 @@ kraken-trading-bot ── PUT /state (gzip, at each tick) ──▶ kraken-dashb
 | `PUT /state` | the bot | every screen: `{"at": 1795316768688, "views": [{"range": "day", "account": null, "data": {…}}]}`, compressed or not (`Content-Encoding: gzip`), the pushes taken one after the other in the order they come |
 | `GET /version` | a reader | `{"version": …, "pushed_at": …}`: the version changes at each push, and from a run to the next |
 | `GET /data?range=day&account=2` | a reader | the data of a screen as the bot pushed it, gzip to whoever accepts it; no `account`: all of them added up |
+| `GET /` | a browser | the page, compressed: the dashboard reading the routes above, a screen at a time, when the bot pushed or a key changes what's shown |
 
 A screen is a range (`hour`, `day`, `week`, `month`, `all`) of all the accounts of the bot added
 up, and of each account when there are several. The backend keeps its data as the bot wrote it,
@@ -55,9 +67,16 @@ A push of the demo database of the bot (8 managers, 3 pairs, 7 days) is about 72
 
 ## Development
 
+```text
+src/     the backend (axum)
+front/   the page: the dashboard of kraken-trading-bot (its crate kraken-dashboard, without the
+         terminal) in WebAssembly, built by trunk
+```
+
 ```sh
 cargo test
 cargo clippy --all-targets -- -D warnings
+cargo clippy -p kraken-dashboard-web-front --target wasm32-unknown-unknown -- -D warnings
 ```
 
 ## License

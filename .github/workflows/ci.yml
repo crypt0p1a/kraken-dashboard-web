@@ -22,8 +22,11 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --check
+      - run: cargo fmt --all --check
       - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: rustup target add wasm32-unknown-unknown
+      # the page, in WebAssembly
+      - run: cargo clippy -p kraken-dashboard-web-front --target wasm32-unknown-unknown --locked -- -D warnings
 
   test:
     name: Tests
@@ -41,7 +44,7 @@ jobs:
       - uses: actions/checkout@v7
       - name: Build the image
         run: docker build -t kraken-dashboard-web:ci .
-      - name: Answers on its port
+      - name: Answers on its port, and serves its page
         run: |
           docker run -d --rm --name backend -p 127.0.0.1:8080:8080 kraken-dashboard-web:ci
           for attempt in $(seq 1 30); do
@@ -49,4 +52,8 @@ jobs:
             sleep 1
           done
           curl -sf http://127.0.0.1:8080/version | grep -q '"version"'
+          page=$(curl -sf http://127.0.0.1:8080/)
+          wasm=$(echo "$page" | grep -oE 'kraken-dashboard-web-front-[0-9a-f]+_bg\.wasm' | head -1)
+          test -n "$wasm"
+          curl -sf -o /dev/null -w '%{content_type}\n' "http://127.0.0.1:8080/$wasm" | grep -q application/wasm
           docker stop backend

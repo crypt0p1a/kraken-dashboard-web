@@ -7,6 +7,7 @@
 //! | `PUT /state` | the bot | [`Push`]: every screen, JSON, compressed with gzip or not |
 //! | `GET /version` | a reader | [`Version`]: changes at each push, and from a run to the next |
 //! | `GET /data?range=day&account=2` | a reader | the data of a screen, as the bot pushed it; no `account`: all of them added up |
+//! | `GET /` | a browser | the page: the dashboard as the terminal shows it, reading the routes above |
 //!
 //! The data of a screen is kept as the bot wrote it, never read here: what it holds is the
 //! business of the bot and of the dashboard. Nothing is kept on disk: started again, the backend
@@ -30,6 +31,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
 use std::collections::HashMap;
 use std::io::{Read, Write};
+use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 pub const STATE: &str = "/state";
@@ -113,12 +115,23 @@ impl Shared {
     }
 }
 
-/// The routes, the version starting from now
-pub fn router() -> Router {
+/// The routes and the page in `assets`, the version starting from now
+pub fn router(assets: Option<&Path>) -> Router {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |it| it.as_millis() as u64);
-    router_with(Shared::new(now))
+    let router = router_with(Shared::new(now));
+    match assets {
+        Some(assets) => with_page(router, assets),
+        None => router,
+    }
+}
+
+/// The page served from `assets` (front/dist), for what isn't a route: its index at `/`
+pub fn with_page(router: Router, assets: &Path) -> Router {
+    let page = tower_http::services::ServeDir::new(assets).append_index_html_on_directories(true);
+    let compressed = tower::Layer::layer(&tower_http::compression::CompressionLayer::new(), page);
+    router.fallback_service(compressed)
 }
 
 pub fn router_with(shared: Shared) -> Router {
@@ -130,12 +143,13 @@ pub fn router_with(shared: Shared) -> Router {
         .with_state(shared)
 }
 
-/// Serves until `shutdown`
+/// Serves until `shutdown`, the page from `assets`
 pub async fn serve(
     listener: tokio::net::TcpListener,
+    assets: Option<&Path>,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> std::io::Result<()> {
-    axum::serve(listener, router())
+    axum::serve(listener, router(assets))
         .with_graceful_shutdown(shutdown)
         .await
 }

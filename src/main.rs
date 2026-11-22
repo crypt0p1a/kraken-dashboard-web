@@ -6,6 +6,9 @@
 //!
 //! ADDRESS: where it listens, KRAKEN_DASHBOARD_WEB_LISTEN else 127.0.0.1:8080. In the image,
 //! 0.0.0.0:8080: reached through the port Docker publishes.
+//!
+//! The page is served from KRAKEN_DASHBOARD_WEB_PAGE, else ./front/dist (built by
+//! `trunk build --release` in front/): without it, the routes only.
 
 use std::process::ExitCode;
 use tracing_subscriber::EnvFilter;
@@ -57,8 +60,17 @@ async fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    tracing::info!(%address, "listening");
-    match kraken_dashboard_web::serve(listener, shutdown()).await {
+    let page = std::env::var_os("KRAKEN_DASHBOARD_WEB_PAGE")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("front/dist"));
+    let page = if page.join("index.html").is_file() {
+        tracing::info!(%address, page = %page.display(), "listening");
+        Some(page)
+    } else {
+        tracing::warn!(%address, page = %page.display(), "listening, without the page: built by trunk build --release in front/");
+        None
+    };
+    match kraken_dashboard_web::serve(listener, page.as_deref(), shutdown()).await {
         Ok(()) => {
             tracing::info!("stopped");
             ExitCode::SUCCESS
