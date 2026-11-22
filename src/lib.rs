@@ -266,15 +266,40 @@ struct Login {
     password: String,
 }
 
+/// Where a request comes from: the address of its connection, or, from this machine (nginx in
+/// front), the one nginx tells (X-Real-IP). Unknown, the tests: all the same
+fn client_of(
+    headers: &HeaderMap,
+    connection: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
+) -> std::net::IpAddr {
+    let peer = connection.map(|it| it.0.ip());
+    let behind_nginx = peer.is_none_or(|it| it.is_loopback());
+    let told = headers
+        .get("x-real-ip")
+        .and_then(|it| it.to_str().ok())
+        .and_then(|it| it.trim().parse().ok());
+    match (behind_nginx, told, peer) {
+        (true, Some(told), _) => told,
+        (_, _, Some(peer)) => peer,
+        _ => std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+    }
+}
+
 /// The password checked: a session and the dashboard, or the page again, told why
-async fn log_in(State(shared): State<Shared>, axum::Form(form): axum::Form<Login>) -> Response {
+async fn log_in(
+    State(shared): State<Shared>,
+    headers: HeaderMap,
+    connection: Option<axum::Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
+    axum::Form(form): axum::Form<Login>,
+) -> Response {
+    let from = client_of(&headers, connection.map(|it| it.0));
     let Some(auth) = shared.auth.clone() else {
         return (StatusCode::SEE_OTHER, [(header::LOCATION, "/")]).into_response();
     };
     // argon2 takes its time: off the threads serving the routes
     let checked = {
         let auth = auth.clone();
-        tokio::task::spawn_blocking(move || auth.log_in(&form.password, now_millis())).await
+        tokio::task::spawn_blocking(move || auth.log_in(&form.password, from, now_millis())).await
     };
     match checked {
         Ok(Ok(token)) => (
@@ -286,11 +311,11 @@ async fn log_in(State(shared): State<Shared>, axum::Form(form): axum::Form<Login
         )
             .into_response(),
         Ok(Err(auth::Refused::WrongPassword)) => {
-            tracing::warn!("a wrong password");
+            tracing::warn!(%from, "a wrong password");
             (StatusCode::UNAUTHORIZED, login(Some("Not the password."))).into_response()
         }
         Ok(Err(auth::Refused::TooManyTries)) => {
-            tracing::warn!("a login refused: too many wrong passwords");
+            tracing::warn!(%from, "a login refused: too many tries");
             (
                 StatusCode::TOO_MANY_REQUESTS,
                 login(Some("Too many tries: wait a minute.")),
@@ -345,9 +370,13 @@ pub async fn serve(
     config: Config,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> std::io::Result<()> {
-    axum::serve(listener, router(config))
-        .with_graceful_shutdown(shutdown)
-        .await
+    // the address of each connection: the tries to log in counted by it
+    axum::serve(
+        listener,
+        router(config).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown)
+    .await
 }
 
 /// Compressed, as `Content-Encoding: gzip`
@@ -591,5 +620,37 @@ mod tests {
             headers.insert(header::ACCEPT_ENCODING, accept.parse().unwrap());
             assert_eq!(accepts_gzip(&headers), gzip, "{accept}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests_of_clients {
+    use super::*;
+    use axum::extract::ConnectInfo;
+
+    fn told(ip: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-real-ip", ip.parse().unwrap());
+        headers
+    }
+
+    #[test]
+    fn counts_the_tries_by_where_they_come_from() {
+        let nginx = Some(ConnectInfo("127.0.0.1:40000".parse().unwrap()));
+        let away = Some(ConnectInfo("203.0.113.9:40000".parse().unwrap()));
+        // behind nginx: the address it tells
+        assert_eq!(
+            client_of(&told("92.161.66.55"), nginx).to_string(),
+            "92.161.66.55"
+        );
+        // reached straight: never what the request says of itself
+        assert_eq!(
+            client_of(&told("92.161.66.55"), away).to_string(),
+            "203.0.113.9"
+        );
+        assert_eq!(
+            client_of(&HeaderMap::new(), away).to_string(),
+            "203.0.113.9"
+        );
     }
 }

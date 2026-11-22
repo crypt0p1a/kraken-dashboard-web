@@ -46,13 +46,15 @@ push heard on the way can't be sent again, nor one held back to replace a newer 
 
 **The dashboard wants a password**: the page and what it reads, with a session only. The password
 is kept hashed (argon2id) in `KRAKEN_DASHBOARD_WEB_PASSWORD_HASH`, made by `hash-password`; logged
-in, a session of a month in a cookie (`HttpOnly`, `SameSite=Strict`, `Secure`), `/logout` to end it.
-Five wrong passwords in a minute and the next are refused until the minute is over. Served in
+in, a session of a month in a cookie (`HttpOnly`, `SameSite=Lax`, `Secure`), `/logout` to end it.
+Five tries in a minute from an address, fifty from all of them, and the next are refused until the
+minute is over, tries sent at once counted as many. Behind a proxy on the same machine, the address
+is the one it tells in `X-Real-IP` (nginx: `proxy_set_header X-Real-IP $remote_addr;`). Served in
 plain HTTP, `KRAKEN_DASHBOARD_WEB_COOKIE_SECURE=false`; on the internet, behind HTTPS always (nginx,
 Caddy).
 
-Without Docker, the page first, then the backend serving it, `KRAKEN_DASHBOARD_WEB_PUSH_KEY` in
-its environment:
+Without Docker, the page first, then the backend serving it, `KRAKEN_DASHBOARD_WEB_PUSH_KEY` and
+`KRAKEN_DASHBOARD_WEB_PASSWORD_HASH` (`cargo run --release -- hash-password`) in its environment:
 
 ```sh
 rustup target add wasm32-unknown-unknown
@@ -75,6 +77,11 @@ kraken-trading-bot ── PUT /state (gzip, at each tick) ──▶ kraken-dashb
 | `GET /version` | a reader | `{"version": …, "pushed_at": …}`: the version changes at each push, and from a run to the next |
 | `GET /data?range=day&account=2` | a reader | the data of a screen as the bot pushed it, gzip to whoever accepts it; no `account`: all of them added up |
 | `GET /` | a browser | the page, compressed: the dashboard reading the routes above, a screen at a time, when the bot pushed or a key changes what's shown |
+| `GET /login`, `POST /login` | a browser | the page to log in, the password checked: a session |
+| `GET /logout` | a browser | the session over |
+
+All but `PUT /state` and the login want a session: without one, the page sends to `/login`, the
+routes answer 401.
 
 A screen is a range (`hour`, `day`, `week`, `month`, `all`) of all the accounts of the bot added
 up, and of each account when there are several. The backend keeps its data as the bot wrote it,

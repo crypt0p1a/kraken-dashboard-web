@@ -53,6 +53,18 @@ fn hash_password() -> Result<String, String> {
 
 const DEFAULT_LISTEN: &str = "127.0.0.1:8080";
 
+/// KRAKEN_DASHBOARD_WEB_COOKIE_SECURE: true unless told false, whatever its case; another word is
+/// refused rather than read as true, a cookie the browser would never send back
+fn secure_cookie(value: &str) -> Result<bool, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "" | "true" | "1" | "yes" => Ok(true),
+        "false" | "0" | "no" => Ok(false),
+        other => Err(format!(
+            "KRAKEN_DASHBOARD_WEB_COOKIE_SECURE: \"{other}\", true or false"
+        )),
+    }
+}
+
 fn listen(arguments: &[String], environment: Option<String>) -> Result<String, String> {
     match arguments {
         [] => Ok(environment
@@ -125,12 +137,15 @@ async fn main() -> ExitCode {
         }
     };
     // HTTPS but told otherwise: the cookie is sent back over HTTPS only
-    let secure = !matches!(
-        std::env::var("KRAKEN_DASHBOARD_WEB_COOKIE_SECURE")
-            .unwrap_or_default()
-            .trim(),
-        "false" | "0" | "no"
-    );
+    let secure = match secure_cookie(
+        &std::env::var("KRAKEN_DASHBOARD_WEB_COOKIE_SECURE").unwrap_or_default(),
+    ) {
+        Ok(secure) => secure,
+        Err(error) => {
+            eprintln!("kraken-dashboard-web: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
     let page = std::env::var_os("KRAKEN_DASHBOARD_WEB_PAGE")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::path::PathBuf::from("front/dist"));
@@ -183,6 +198,19 @@ async fn shutdown() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reads_whether_the_cookie_is_secure() {
+        for (value, secure) in [
+            ("", true),
+            ("TRUE", true),
+            ("False", false),
+            (" no ", false),
+        ] {
+            assert_eq!(secure_cookie(value), Ok(secure), "{value}");
+        }
+        assert!(secure_cookie("off").is_err());
+    }
 
     #[test]
     fn reads_where_to_listen() {

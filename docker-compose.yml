@@ -1,6 +1,9 @@
 # The web backend of kraken-trading-bot:
 #
-#   docker compose up -d --build
+#   cp .env.example .env                                      # KRAKEN_DASHBOARD_WEB_PUSH_KEY
+#   docker compose build
+#   docker compose run --rm -it kraken-dashboard-web hash-password >> .env   # the password
+#   docker compose up -d
 #   docker compose logs -f
 #
 # The bot pushes to it with KRAKEN_BOT_PUSH_URL=http://this-machine:8080 in its .env, signed with

@@ -436,7 +436,7 @@ async fn reads_with_a_session_only() {
     assert_eq!(right.status(), StatusCode::SEE_OTHER);
     assert_eq!(right.headers()["location"], "/");
     let cookie = right.headers()["set-cookie"].to_str().unwrap().to_string();
-    for it in ["kraken_session=", "HttpOnly", "SameSite=Strict", "Secure"] {
+    for it in ["kraken_session=", "HttpOnly", "SameSite=Lax", "Secure"] {
         assert!(cookie.contains(it), "{it}: {cookie}");
     }
     let session = cookie.split(';').next().unwrap().to_string();
@@ -475,7 +475,8 @@ async fn reads_with_a_session_only() {
     std::fs::remove_dir_all(folder).unwrap();
 }
 
-/// Too many wrong passwords in a minute: refused, the right one included, without being checked
+/// Too many tries in a minute: refused, the right one included, without being checked. Sent all at
+/// once, they count as many
 #[tokio::test]
 async fn refuses_logins_after_too_many_wrong_passwords() {
     use kraken_dashboard_web::auth::{Auth, TRIES, hash_password};
