@@ -2,7 +2,12 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- a screen of a terminal, never zoomed: Safari on iOS ignores user-scalable, the gestures are
+         stopped below -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"
+    />
     <title>kraken-trading-bot</title>
     <link data-trunk rel="rust" data-bin="kraken-dashboard-web-front" />
     <style>
@@ -14,6 +19,11 @@
         overflow: hidden;
         /* the background of the desk, as the terminal shows it */
         background-color: #07090d;
+        /* a tap is a tap: no zoom on a double one, nor with two fingers, no scroll */
+        touch-action: none;
+        -webkit-user-select: none;
+        user-select: none;
+        -webkit-tap-highlight-color: transparent;
       }
       body {
         /* the monospace fonts of a terminal, braille included for the charts */
@@ -52,6 +62,16 @@
           event.preventDefault();
         }
       }, { capture: true });
+      // Safari on iOS zooms with two fingers whatever the viewport says: its gestures stopped
+      for (const gesture of ["gesturestart", "gesturechange", "gestureend"]) {
+        document.addEventListener(gesture, (event) => event.preventDefault(), { passive: false });
+      }
+      document.addEventListener("touchmove", (event) => {
+        if (event.touches.length > 1) {
+          event.preventDefault();
+        }
+      }, { passive: false });
+      document.addEventListener("dblclick", (event) => event.preventDefault(), { passive: false });
     </script>
   </body>
 </html>

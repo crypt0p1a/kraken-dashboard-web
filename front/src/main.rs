@@ -88,6 +88,7 @@ fn main() -> std::io::Result<()> {
     let backend = measured::Measured::new(DomBackend::new().map_err(std::io::Error::other)?)?;
     let terminal = Terminal::new(backend)?;
     listen_to_the_keys(state.clone())?;
+    listen_to_the_taps(state.clone())?;
 
     wasm_bindgen_futures::spawn_local(poll(state.clone()));
 
@@ -113,7 +114,7 @@ fn listen_to_the_keys(state: Shared) -> std::io::Result<()> {
             if event.meta_key() || event.alt_key() || event.ctrl_key() {
                 return;
             }
-            on_key(&state, event.into());
+            on_key(&state, key_of(event.into()));
         });
     document
         .add_event_listener_with_callback("keydown", listener.as_ref().unchecked_ref())
@@ -121,6 +122,61 @@ fn listen_to_the_keys(state: Shared) -> std::io::Result<()> {
     // for the life of the page
     listener.forget();
     Ok(())
+}
+
+/// The taps of the whole page, a key each when the dashboard says one is under it: a tablet or a
+/// phone has no keyboard. The cell tapped is read from the grid of ratzilla in the page, made
+/// again at each resize
+fn listen_to_the_taps(state: Shared) -> std::io::Result<()> {
+    use wasm_bindgen::JsCast;
+    use wasm_bindgen::closure::Closure;
+
+    let document = web_sys::window()
+        .and_then(|it| it.document())
+        .ok_or_else(|| std::io::Error::other("no document"))?;
+    let listener =
+        Closure::<dyn FnMut(web_sys::MouseEvent)>::new(move |event: web_sys::MouseEvent| {
+            let Some((area, column, row)) = cell_at(event.client_x(), event.client_y()) else {
+                return;
+            };
+            let key = {
+                let state = state.borrow();
+                kraken_dashboard::ui::tap(&state.app, area, column, row)
+            };
+            if let Some(code) = key {
+                on_key(&state, KeyEvent::new(code, KeyModifiers::NONE));
+            }
+        });
+    document
+        .add_event_listener_with_callback("click", listener.as_ref().unchecked_ref())
+        .map_err(|_| std::io::Error::other("the taps can't be listened to"))?;
+    // for the life of the page
+    listener.forget();
+    Ok(())
+}
+
+/// The screen and the cell under a point of the page: the grid of ratzilla, a line of cells per
+/// `pre`, as many cells as characters
+fn cell_at(x: i32, y: i32) -> Option<(ratzilla::ratatui::layout::Rect, u16, u16)> {
+    let grid = web_sys::window()?.document()?.get_element_by_id("grid")?;
+    let lines = grid.children();
+    let rows = lines.length() as u16;
+    let columns = lines.item(0)?.text_content()?.chars().count() as u16;
+    if rows == 0 || columns == 0 {
+        return None;
+    }
+    let bounds = grid.get_bounding_client_rect();
+    let (cell_width, cell_height) = (
+        bounds.width() / f64::from(columns),
+        bounds.height() / f64::from(rows),
+    );
+    let column = ((f64::from(x) - bounds.left()) / cell_width).floor();
+    let row = ((f64::from(y) - bounds.top()) / cell_height).floor();
+    if column < 0.0 || row < 0.0 || column >= f64::from(columns) || row >= f64::from(rows) {
+        return None;
+    }
+    let area = ratzilla::ratatui::layout::Rect::new(0, 0, columns, rows);
+    Some((area, column as u16, row as u16))
 }
 
 /// Where the page comes from, as the header of the dashboard names its source
@@ -157,11 +213,11 @@ fn key_of(key: ratzilla::event::KeyEvent) -> KeyEvent {
     KeyEvent::new(code, modifiers)
 }
 
-fn on_key(state: &Shared, key: ratzilla::event::KeyEvent) {
+fn on_key(state: &Shared, key: KeyEvent) {
     let changed = {
         let mut state = state.borrow_mut();
         let State { app, pushed, .. } = &mut *state;
-        let changed = app.on_key(key_of(key));
+        let changed = app.on_key(key);
         // a page isn't quit: q does nothing
         app.quit = false;
         app.ask_tick(pushed);
