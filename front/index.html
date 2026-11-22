@@ -18,7 +18,15 @@
       body {
         /* the monospace fonts of a terminal, braille included for the charts */
         font-family: Menlo, Monaco, Consolas, "DejaVu Sans Mono", "Liberation Mono", monospace;
+        /* 14px, smaller when the screen is: the dashboard wants 100 by 28 cells at least, as a
+           terminal. A cell is 0.6em wide and 1.18em high: 100 cells in 62em, 28 in 34em. A phone
+           gets about 6px, read zoomed in */
         font-size: 14px;
+        font-size: min(14px, calc(100vw / 62), calc(100vh / 34));
+        font-size: min(14px, calc(100vw / 62), calc(100dvh / 34));
+        /* never enlarged by the browser of a phone, in landscape: the cells as measured */
+        -webkit-text-size-adjust: 100%;
+        text-size-adjust: 100%;
       }
       pre {
         font-family: inherit;
