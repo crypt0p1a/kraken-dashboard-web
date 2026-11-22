@@ -18,19 +18,20 @@ RUN rustup target add wasm32-unknown-unknown \
     && rm "${archive}"
 WORKDIR /build
 COPY . .
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/build/target \
-    cd front && trunk build --release \
+# caches of their own: the two stages run at once, on two versions of glibc
+RUN --mount=type=cache,id=page-registry,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=page-git,target=/usr/local/cargo/git \
+    --mount=type=cache,id=page-target,target=/build/target \
+    cd front && trunk build --release --locked \
     && cp -r dist /page
 
 # ---- the backend ----
 FROM rust:1-bookworm AS builder
 WORKDIR /build
 COPY . .
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/build/target \
+RUN --mount=type=cache,id=backend-registry,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=backend-git,target=/usr/local/cargo/git \
+    --mount=type=cache,id=backend-target,target=/build/target \
     cargo build --release --locked -p kraken-dashboard-web \
     && cp target/release/kraken-dashboard-web /kraken-dashboard-web
 

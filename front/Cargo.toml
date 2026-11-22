@@ -8,9 +8,10 @@ license = "MIT"
 publish = false
 
 [dependencies]
-# the dashboard itself, its screen and its logic, without the terminal nor SQLite
-kraken-dashboard = { git = "https://github.com/crypt0p1a/kraken-trading-bot", branch = "dashboard-server", default-features = false }
-kraken-dashboard-data = { git = "https://github.com/crypt0p1a/kraken-trading-bot", branch = "dashboard-server", default-features = false }
+# the dashboard itself, its screen and its logic, without the terminal nor SQLite: a commit of the
+# pull request crypt0p1a/kraken-trading-bot#12, main once it's merged
+kraken-dashboard = { git = "https://github.com/crypt0p1a/kraken-trading-bot", rev = "7aa9b259f49a36aeed464f97b864784923bddc5b", default-features = false }
+kraken-dashboard-data = { git = "https://github.com/crypt0p1a/kraken-trading-bot", rev = "7aa9b259f49a36aeed464f97b864784923bddc5b", default-features = false }
 # ratatui in the page, its cells in the DOM
 ratzilla = "0.3.1"
 # ratatui asks for one in WebAssembly: the one of std, a page on a single thread

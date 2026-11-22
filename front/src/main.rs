@@ -58,6 +58,11 @@ struct State {
     pushed: Pushed,
     /// The settings last kept, written again when they change
     kept: Option<Settings>,
+    /// The settings kept, applied again once the first screen is read: the account shown needs the
+    /// accounts of the bot, unknown before. Nothing is written meanwhile
+    pending: Option<Settings>,
+    /// The last error is the poll's: gone as soon as the backend answers again
+    poll_failed: bool,
 }
 
 type Shared = Rc<RefCell<State>>;
@@ -67,7 +72,7 @@ fn main() -> std::io::Result<()> {
         ratzilla::web_sys::console::error_1(&info.to_string().into());
     }));
     let mut app = App::new(origin());
-    // the screen as it was left
+    // the screen as it was left: its range at once, its account once the accounts are known
     let kept = load_settings();
     if let Some(settings) = &kept {
         app.apply(settings.clone());
@@ -75,7 +80,9 @@ fn main() -> std::io::Result<()> {
     let state: Shared = Rc::new(RefCell::new(State {
         app,
         pushed: Pushed::default(),
+        pending: kept.clone(),
         kept,
+        poll_failed: false,
     }));
 
     let backend = measured::Measured::new(DomBackend::new().map_err(std::io::Error::other)?)?;
@@ -102,8 +109,8 @@ fn listen_to_the_keys(state: Shared) -> std::io::Result<()> {
         .ok_or_else(|| std::io::Error::other("no document"))?;
     let listener =
         Closure::<dyn FnMut(web_sys::KeyboardEvent)>::new(move |event: web_sys::KeyboardEvent| {
-            // the shortcuts of the browser stay its own
-            if event.meta_key() || event.alt_key() {
+            // the shortcuts of the browser stay its own: ctrl+1 is the first tab, not the range
+            if event.meta_key() || event.alt_key() || event.ctrl_key() {
                 return;
             }
             on_key(&state, event.into());
@@ -167,25 +174,33 @@ fn on_key(state: &Shared, key: ratzilla::event::KeyEvent) {
     }
 }
 
-/// Asks the backend whether the bot pushed, again and again
+/// Asks the backend whether the bot pushed, again and again; the screen shown read again when it
+/// did, or when it's still missing, its last read failed
 async fn poll(state: Shared) {
     loop {
         match fetch_version().await {
             Ok(version) => {
-                let pushed = {
+                let missing = {
                     let mut state = state.borrow_mut();
-                    let new = state.pushed.version != Some(version);
-                    if new {
+                    if state.pushed.version != Some(version) {
                         state.pushed.version = Some(version);
                         state.pushed.screens.clear();
                     }
-                    new
+                    if std::mem::take(&mut state.poll_failed) {
+                        state.app.error = None;
+                    }
+                    let shown = (state.app.range, state.app.view);
+                    !state.pushed.screens.contains_key(&shown)
                 };
-                if pushed {
+                if missing {
                     show(state.clone(), false).await;
                 }
             }
-            Err(error) => state.borrow_mut().app.error = Some(error),
+            Err(error) => {
+                let mut state = state.borrow_mut();
+                state.app.error = Some(error);
+                state.poll_failed = true;
+            }
         }
         gloo_timers::future::sleep(POLL).await;
     }
@@ -193,31 +208,60 @@ async fn poll(state: Shared) {
 
 /// The screen of what's shown, read from the backend unless it was already
 async fn show(state: Shared, force: bool) {
-    let (range, account, known) = {
+    let (range, account, known, version) = {
         let state = state.borrow();
         let key = (state.app.range, state.app.view);
-        (key.0, key.1, state.pushed.screens.contains_key(&key))
+        (
+            key.0,
+            key.1,
+            state.pushed.screens.contains_key(&key),
+            state.pushed.version,
+        )
     };
     if !known {
-        match fetch_screen(range, account).await {
+        let read = fetch_screen(range, account).await;
+        let mut state = state.borrow_mut();
+        // the bot pushed meanwhile: this screen is of before, the read of the new one follows
+        if state.pushed.version != version {
+            return;
+        }
+        match read {
             Ok(data) => {
-                state
-                    .borrow_mut()
-                    .pushed
-                    .screens
-                    .insert((range, account), data);
+                state.pushed.screens.insert((range, account), data);
             }
             Err(error) => {
-                state.borrow_mut().app.error = Some(error);
+                state.app.error = Some(error);
                 return;
             }
         }
     }
-    let mut state = state.borrow_mut();
-    let State { app, pushed, .. } = &mut *state;
-    // a key changed it meanwhile: its own read follows
-    if (app.range, app.view) == (range, account) {
+    let moved = {
+        let mut state = state.borrow_mut();
+        let State {
+            app,
+            pushed,
+            pending,
+            ..
+        } = &mut *state;
+        // a key changed it meanwhile: its own read follows
+        if (app.range, app.view) != (range, account) {
+            return;
+        }
         app.refresh(pushed, force || !known);
+        // the first screen read: the accounts known, the screen as it was left
+        match pending.take() {
+            Some(settings) if app.error.is_none() => {
+                app.apply(settings);
+                (app.range, app.view) != (range, account)
+            }
+            other => {
+                *pending = other;
+                false
+            }
+        }
+    };
+    if moved {
+        Box::pin(show(state, true)).await;
     }
 }
 
@@ -279,9 +323,13 @@ fn load_settings() -> Option<Settings> {
     serde_json::from_str(&text).ok()
 }
 
-/// Written as soon as they change: the dashboard works the same without them
+/// Written as soon as they change: the dashboard works the same without them. Not before the kept
+/// ones are applied, which would lose their account
 fn keep_settings(state: &Shared) {
     let mut state = state.borrow_mut();
+    if state.pending.is_some() {
+        return;
+    }
     let current = state.app.settings();
     if state.kept.as_ref() == Some(&current) {
         return;

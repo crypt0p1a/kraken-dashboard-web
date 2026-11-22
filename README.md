@@ -70,7 +70,8 @@ A push of the demo database of the bot (8 managers, 3 pairs, 7 days) is about 72
 ```text
 src/     the backend (axum)
 front/   the page: the dashboard of kraken-trading-bot (its crate kraken-dashboard, without the
-         terminal) in WebAssembly, built by trunk
+         terminal, at a commit of crypt0p1a/kraken-trading-bot#12 until it's merged) in
+         WebAssembly, built by trunk
 ```
 
 ```sh
