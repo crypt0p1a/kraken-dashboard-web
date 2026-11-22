@@ -274,6 +274,8 @@ async fn serves_the_page() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.headers()["content-encoding"], "gzip");
+    // the page asked again at each visit: a new image, a new page
+    assert_eq!(response.headers()["cache-control"], "no-cache");
     let text = reqwest::get(format!("{url}/"))
         .await
         .unwrap()

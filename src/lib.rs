@@ -147,7 +147,26 @@ pub fn router(config: Config) -> Router {
 pub fn with_page(router: Router, assets: &Path) -> Router {
     let page = tower_http::services::ServeDir::new(assets).append_index_html_on_directories(true);
     let compressed = tower::Layer::layer(&tower_http::compression::CompressionLayer::new(), page);
-    router.fallback_service(compressed)
+    router
+        .fallback_service(compressed)
+        .layer(axum::middleware::map_response(asked_again))
+}
+
+/// The page itself asked again at each visit, never kept by the browser: an image built again
+/// serves new files, whose names, which change with what they hold, are in it. Those files are kept
+async fn asked_again(mut response: Response) -> Response {
+    let html = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|it| it.to_str().ok())
+        .is_some_and(|it| it.starts_with("text/html"));
+    if html {
+        response.headers_mut().insert(
+            header::CACHE_CONTROL,
+            header::HeaderValue::from_static("no-cache"),
+        );
+    }
+    response
 }
 
 pub fn router_with(shared: Shared) -> Router {
