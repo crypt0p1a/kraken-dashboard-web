@@ -1,0 +1,27 @@
+# The web backend of kraken-trading-bot:
+#
+#   docker compose up -d --build
+#   docker compose logs -f
+#
+# The bot pushes to it with KRAKEN_BOT_PUSH_URL=http://this-machine:8080 in its .env.
+#
+# KRAKEN_DASHBOARD_WEB_PUBLISH is where the port is published on this machine, 127.0.0.1:8080 by
+# default: this machine only. Nothing is authenticated yet: whoever reaches the port can replace
+# what's shown. Beyond this machine, only on a network of your own (a VPN such as WireGuard or
+# Tailscale), never on the internet.
+
+services:
+  kraken-dashboard-web:
+    build: .
+    image: kraken-dashboard-web
+    container_name: kraken-dashboard-web
+    restart: unless-stopped
+    environment:
+      RUST_LOG: info
+    ports:
+      - "${KRAKEN_DASHBOARD_WEB_PUBLISH:-127.0.0.1:8080}:8080"
+    logging:
+      driver: json-file
+      options:
+        max-size: 50m
+        max-file: "10"
