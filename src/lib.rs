@@ -8,12 +8,15 @@
 //! | `GET /version` | a reader | [`Version`]: changes at each push, and from a run to the next |
 //! | `GET /data?range=day&account=2` | a reader | the data of a screen, as the bot pushed it; no `account`: all of them added up |
 //! | `GET /` | a browser | the page: the dashboard as the terminal shows it, reading the routes above |
+//! | `GET /login`, `POST /login` | a browser | the page to log in, the password checked |
+//! | `GET /logout` | a browser | the session over |
 //!
 //! The data of a screen is kept as the bot wrote it, never read here: what it holds is the
 //! business of the bot and of the dashboard. Nothing is kept on disk: started again, the backend
 //! has nothing until the next push of the bot.
 //!
-//! The pushes are signed with a key only the bot and the backend know ([`signature`]).
+//! The pushes are signed with a key only the bot and the backend know ([`signature`]); the rest,
+//! the page and what it reads, wants a session, opened with a password ([`auth`]).
 //!
 //! [kraken-trading-bot]: https://github.com/crypt0p1a/kraken-trading-bot
 
@@ -33,11 +36,14 @@ use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 
+pub mod auth;
 pub mod signature;
 
 pub const STATE: &str = "/state";
 pub const VERSION: &str = "/version";
 pub const DATA: &str = "/data";
+pub const LOGIN: &str = "/login";
+pub const LOGOUT: &str = "/logout";
 
 /// The largest push as it comes, compressed or not
 pub const MAX_PUSH: usize = 64 * 1024 * 1024;
@@ -95,6 +101,8 @@ pub struct Shared {
     pushing: Arc<tokio::sync::Mutex<()>>,
     /// Checks the signatures of the pushes
     signatures: Arc<signature::Verifier>,
+    /// Who reads: None, everyone, the tests only
+    auth: Option<Arc<auth::Auth>>,
 }
 
 impl Shared {
@@ -108,7 +116,14 @@ impl Shared {
                 views: HashMap::new(),
             })),
             pushing: Arc::new(tokio::sync::Mutex::new(())),
+            auth: None,
         }
+    }
+
+    /// Read with a session only, opened with the password of `auth`
+    pub fn with_auth(mut self, auth: auth::Auth) -> Self {
+        self.auth = Some(Arc::new(auth));
+        self
     }
 
     fn lock(&self) -> MutexGuard<'_, Stored> {
@@ -123,6 +138,8 @@ impl Shared {
 pub struct Config {
     /// The key the bot signs its pushes with
     pub push_key: Vec<u8>,
+    /// Who reads: the password, its sessions
+    pub auth: auth::Auth,
     /// Where the page is (front/dist): the routes only without it
     pub page: Option<std::path::PathBuf>,
 }
@@ -136,20 +153,168 @@ pub fn now_millis() -> i64 {
 
 /// The routes and the page, the version starting from now
 pub fn router(config: Config) -> Router {
-    let router = router_with(Shared::new(now_millis() as u64, config.push_key));
-    match &config.page {
-        Some(page) => with_page(router, page),
-        None => router,
+    let shared = Shared::new(now_millis() as u64, config.push_key).with_auth(config.auth);
+    app(shared, config.page.as_deref())
+}
+
+/// The routes, and the page served from `page` (front/dist) for what isn't one: its index at `/`.
+/// The pushes and the login open to all, the rest behind a session when `shared` has an auth
+pub fn app(shared: Shared, page: Option<&Path>) -> Router {
+    let mut read = Router::new()
+        .route(VERSION, get(version))
+        .route(DATA, get(data));
+    if let Some(page) = page {
+        let files =
+            tower_http::services::ServeDir::new(page).append_index_html_on_directories(true);
+        let compressed =
+            tower::Layer::layer(&tower_http::compression::CompressionLayer::new(), files);
+        read = read.fallback_service(compressed);
+    }
+    let read = read.layer(axum::middleware::from_fn_with_state(
+        shared.clone(),
+        with_a_session,
+    ));
+    Router::new()
+        // the push only is large: the other bodies keep the default limit
+        .route(STATE, put(push).layer(DefaultBodyLimit::max(MAX_PUSH)))
+        .route(LOGIN, get(login_page).post(log_in))
+        .route(LOGOUT, get(log_out))
+        .merge(read)
+        .layer(axum::middleware::map_response(asked_again))
+        .with_state(shared)
+}
+
+/// The page and what it reads, with a session only: the page sent to log in, the routes refused
+async fn with_a_session(
+    State(shared): State<Shared>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let Some(auth) = &shared.auth else {
+        return next.run(request).await;
+    };
+    if auth.has_session(request.headers(), now_millis()) {
+        return next.run(request).await;
+    }
+    let path = request.uri().path();
+    if path == VERSION || path == DATA {
+        (StatusCode::UNAUTHORIZED, "log in first: /login").into_response()
+    } else {
+        (StatusCode::SEE_OTHER, [(header::LOCATION, LOGIN)]).into_response()
     }
 }
 
-/// The page served from `assets` (front/dist), for what isn't a route: its index at `/`
-pub fn with_page(router: Router, assets: &Path) -> Router {
-    let page = tower_http::services::ServeDir::new(assets).append_index_html_on_directories(true);
-    let compressed = tower::Layer::layer(&tower_http::compression::CompressionLayer::new(), page);
-    router
-        .fallback_service(compressed)
-        .layer(axum::middleware::map_response(asked_again))
+/// The page to log in, a terminal as the dashboard, `told` under the field
+fn login(told: Option<&str>) -> axum::response::Html<String> {
+    let told = told
+        .map(|it| format!("<p class=\"told\">{it}</p>"))
+        .unwrap_or_default();
+    axum::response::Html(LOGIN_PAGE.replace("<!--told-->", &told))
+}
+
+const LOGIN_PAGE: &str = r#"<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>kraken-trading-bot · log in</title>
+    <style>
+      html, body { margin: 0; height: 100%; background: #07090d; }
+      body {
+        display: flex; align-items: center; justify-content: center;
+        font-family: Menlo, Monaco, Consolas, "DejaVu Sans Mono", "Liberation Mono", monospace;
+        font-size: 15px; color: #c9d1d9;
+      }
+      form { border: 1px solid #ffb000; border-radius: 6px; padding: 1.5em 1.8em; min-width: 16em; }
+      h1 { margin: 0 0 1em; font-size: 1em; }
+      h1 span { background: #ffb000; color: #000; padding: 0 0.4em; }
+      label { color: #ffb000; display: block; margin-bottom: 0.4em; }
+      input {
+        width: 100%; box-sizing: border-box; padding: 0.5em; font: inherit; color: inherit;
+        background: #0d1117; border: 1px solid #30363d; border-radius: 4px;
+      }
+      input:focus { outline: none; border-color: #ffb000; }
+      button {
+        margin-top: 1em; width: 100%; padding: 0.5em; font: inherit; font-weight: bold;
+        background: #ffb000; color: #000; border: 0; border-radius: 4px; cursor: pointer;
+      }
+      .told { color: #f85149; margin: 0.8em 0 0; }
+    </style>
+  </head>
+  <body>
+    <form method="post" action="/login">
+      <h1><span>◆ KRAKEN</span> TRADING DESK</h1>
+      <label for="password">PASSWORD</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" autofocus required />
+      <button type="submit">LOG IN</button>
+      <!--told-->
+    </form>
+  </body>
+</html>
+"#;
+
+async fn login_page(State(shared): State<Shared>, headers: HeaderMap) -> Response {
+    match &shared.auth {
+        // logged in already, or nothing to log in to
+        Some(auth) if !auth.has_session(&headers, now_millis()) => login(None).into_response(),
+        _ => (StatusCode::SEE_OTHER, [(header::LOCATION, "/")]).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct Login {
+    password: String,
+}
+
+/// The password checked: a session and the dashboard, or the page again, told why
+async fn log_in(State(shared): State<Shared>, axum::Form(form): axum::Form<Login>) -> Response {
+    let Some(auth) = shared.auth.clone() else {
+        return (StatusCode::SEE_OTHER, [(header::LOCATION, "/")]).into_response();
+    };
+    // argon2 takes its time: off the threads serving the routes
+    let checked = {
+        let auth = auth.clone();
+        tokio::task::spawn_blocking(move || auth.log_in(&form.password, now_millis())).await
+    };
+    match checked {
+        Ok(Ok(token)) => (
+            StatusCode::SEE_OTHER,
+            [
+                (header::LOCATION, "/".to_string()),
+                (header::SET_COOKIE, auth.cookie(&token)),
+            ],
+        )
+            .into_response(),
+        Ok(Err(auth::Refused::WrongPassword)) => {
+            tracing::warn!("a wrong password");
+            (StatusCode::UNAUTHORIZED, login(Some("Not the password."))).into_response()
+        }
+        Ok(Err(auth::Refused::TooManyTries)) => {
+            tracing::warn!("a login refused: too many wrong passwords");
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                login(Some("Too many tries: wait a minute.")),
+            )
+                .into_response()
+        }
+        Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response(),
+    }
+}
+
+/// The session over, the page to log in
+async fn log_out(State(shared): State<Shared>, headers: HeaderMap) -> Response {
+    let Some(auth) = &shared.auth else {
+        return (StatusCode::SEE_OTHER, [(header::LOCATION, "/")]).into_response();
+    };
+    auth.log_out(&headers);
+    (
+        StatusCode::SEE_OTHER,
+        [
+            (header::LOCATION, LOGIN.to_string()),
+            (header::SET_COOKIE, auth.no_cookie()),
+        ],
+    )
+        .into_response()
 }
 
 /// The page itself asked again at each visit, never kept by the browser: an image built again
@@ -169,13 +334,9 @@ async fn asked_again(mut response: Response) -> Response {
     response
 }
 
+/// The routes alone, without the page
 pub fn router_with(shared: Shared) -> Router {
-    Router::new()
-        // the push only is large: the other bodies keep the default limit
-        .route(STATE, put(push).layer(DefaultBodyLimit::max(MAX_PUSH)))
-        .route(VERSION, get(version))
-        .route(DATA, get(data))
-        .with_state(shared)
+    app(shared, None)
 }
 
 /// Serves until `shutdown`

@@ -20,7 +20,9 @@ Read only: nothing goes back to the bot, a tick is asked for from the dashboard 
 
 ```sh
 cp .env.example .env    # KRAKEN_DASHBOARD_WEB_PUSH_KEY: openssl rand -hex 32
-docker compose up -d --build
+docker compose build
+docker compose run --rm -it kraken-dashboard-web hash-password   # its line in .env
+docker compose up -d
 docker compose logs -f
 ```
 
@@ -40,9 +42,14 @@ X-Kraken-Push-Signature: sha256=<hex>        HMAC-SHA256(key, "<at>\n" + the bod
 
 A push not signed with the key is refused before it's read (401), one signed more than 5 minutes
 away from the clock of the backend too, and one signed at or before the last one taken (409): a
-push heard on the way can't be sent again, nor one held back to replace a newer one. **The page itself isn't protected yet**: whoever reaches the port reads the
-dashboard. Beyond this machine, only on a network of your own (a VPN such as WireGuard or
-Tailscale), never on the internet.
+push heard on the way can't be sent again, nor one held back to replace a newer one.
+
+**The dashboard wants a password**: the page and what it reads, with a session only. The password
+is kept hashed (argon2id) in `KRAKEN_DASHBOARD_WEB_PASSWORD_HASH`, made by `hash-password`; logged
+in, a session of a month in a cookie (`HttpOnly`, `SameSite=Strict`, `Secure`), `/logout` to end it.
+Five wrong passwords in a minute and the next are refused until the minute is over. Served in
+plain HTTP, `KRAKEN_DASHBOARD_WEB_COOKIE_SECURE=false`; on the internet, behind HTTPS always (nginx,
+Caddy).
 
 Without Docker, the page first, then the backend serving it, `KRAKEN_DASHBOARD_WEB_PUSH_KEY` in
 its environment:

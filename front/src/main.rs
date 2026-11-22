@@ -321,6 +321,15 @@ async fn show(state: Shared, force: bool) {
     }
 }
 
+/// The session over (401): the page to log in
+fn logged_out(status: u16) {
+    if status == 401
+        && let Some(window) = web_sys::window()
+    {
+        let _ = window.location().set_href("/login");
+    }
+}
+
 async fn fetch_version() -> Result<i64, String> {
     #[derive(serde::Deserialize)]
     struct Version {
@@ -331,6 +340,7 @@ async fn fetch_version() -> Result<i64, String> {
         .await
         .map_err(|error| format!("backend not reached: {error}"))?;
     if !response.ok() {
+        logged_out(response.status());
         return Err(format!("backend: {}", response.status()));
     }
     let version: Version = response
@@ -361,6 +371,7 @@ async fn fetch_screen(range: Range, account: Option<i64>) -> Result<Data, String
             .map_err(|error| format!("backend not reached: {error}"))?;
     }
     if !response.ok() {
+        logged_out(response.status());
         let text = response.text().await.unwrap_or_default();
         return Err(format!("backend: {text}"));
     }

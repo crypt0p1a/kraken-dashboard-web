@@ -2,6 +2,7 @@
 //!
 //! ```text
 //! kraken-dashboard-web [--listen ADDRESS]
+//! kraken-dashboard-web hash-password       the line of .env for a password typed, never shown
 //! ```
 //!
 //! ADDRESS: where it listens, KRAKEN_DASHBOARD_WEB_LISTEN else 127.0.0.1:8080. In the image,
@@ -12,13 +13,43 @@
 //!
 //! KRAKEN_DASHBOARD_WEB_PUSH_KEY, required: the key the bot signs its pushes with, its
 //! KRAKEN_BOT_PUSH_KEY. 32 characters at least: `openssl rand -hex 32`.
+//!
+//! KRAKEN_DASHBOARD_WEB_PASSWORD_HASH, required: the password of the dashboard, hashed, as
+//! `hash-password` gives it. KRAKEN_DASHBOARD_WEB_COOKIE_SECURE=false for a page served in plain
+//! HTTP, whose browser wouldn't send back a cookie only for HTTPS.
 
 use std::process::ExitCode;
 use tracing_subscriber::EnvFilter;
 
 const USAGE: &str = "kraken-dashboard-web [--listen ADDRESS]
+kraken-dashboard-web hash-password
 
-ADDRESS: where it listens, KRAKEN_DASHBOARD_WEB_LISTEN else 127.0.0.1:8080";
+ADDRESS: where it listens, KRAKEN_DASHBOARD_WEB_LISTEN else 127.0.0.1:8080
+hash-password: the line of .env for a password typed, never shown";
+
+/// The line of .env for a password typed twice (read from the input when it isn't a terminal),
+/// quoted: docker compose reads a $ in it literally
+fn hash_password() -> Result<String, String> {
+    use std::io::IsTerminal;
+    let password = if std::io::stdin().is_terminal() {
+        let first = rpassword::prompt_password("password (12 characters at least): ")
+            .map_err(|error| error.to_string())?;
+        let again =
+            rpassword::prompt_password("the same again: ").map_err(|error| error.to_string())?;
+        if first != again {
+            return Err("not the same twice".into());
+        }
+        first
+    } else {
+        let mut line = String::new();
+        std::io::stdin()
+            .read_line(&mut line)
+            .map_err(|error| error.to_string())?;
+        line.trim_end_matches(['\r', '\n']).to_string()
+    };
+    let hash = kraken_dashboard_web::auth::hash_password(&password)?;
+    Ok(format!("KRAKEN_DASHBOARD_WEB_PASSWORD_HASH='{hash}'"))
+}
 
 const DEFAULT_LISTEN: &str = "127.0.0.1:8080";
 
@@ -46,6 +77,18 @@ async fn main() -> ExitCode {
         println!("{USAGE}");
         return ExitCode::SUCCESS;
     }
+    if arguments == ["hash-password"] {
+        return match hash_password() {
+            Ok(line) => {
+                println!("{line}");
+                ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("kraken-dashboard-web: {error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     let address = match listen(
         &arguments,
         std::env::var("KRAKEN_DASHBOARD_WEB_LISTEN").ok(),
@@ -72,6 +115,22 @@ async fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let password_hash = match kraken_dashboard_web::auth::check_hash(
+        &std::env::var("KRAKEN_DASHBOARD_WEB_PASSWORD_HASH").unwrap_or_default(),
+    ) {
+        Ok(hash) => hash,
+        Err(error) => {
+            eprintln!("kraken-dashboard-web: {error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    // HTTPS but told otherwise: the cookie is sent back over HTTPS only
+    let secure = !matches!(
+        std::env::var("KRAKEN_DASHBOARD_WEB_COOKIE_SECURE")
+            .unwrap_or_default()
+            .trim(),
+        "false" | "0" | "no"
+    );
     let page = std::env::var_os("KRAKEN_DASHBOARD_WEB_PAGE")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::path::PathBuf::from("front/dist"));
@@ -82,7 +141,11 @@ async fn main() -> ExitCode {
         tracing::warn!(%address, page = %page.display(), "listening, without the page: built by trunk build --release in front/");
         None
     };
-    let config = kraken_dashboard_web::Config { push_key, page };
+    let config = kraken_dashboard_web::Config {
+        push_key,
+        auth: kraken_dashboard_web::auth::Auth::new(password_hash, secure),
+        page,
+    };
     match kraken_dashboard_web::serve(listener, config, shutdown()).await {
         Ok(()) => {
             tracing::info!("stopped");

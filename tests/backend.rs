@@ -237,6 +237,10 @@ async fn never_has_the_same_version_from_a_run_to_the_next() {
         listener,
         Config {
             push_key: KEY.to_vec(),
+            auth: kraken_dashboard_web::auth::Auth::new(
+                kraken_dashboard_web::auth::hash_password("a long enough password").unwrap(),
+                true,
+            ),
             page: None,
         },
         std::future::pending(),
@@ -245,7 +249,36 @@ async fn never_has_the_same_version_from_a_run_to_the_next() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_millis() as u64;
-    let started = version(&client, &format!("http://{address}")).await.version;
+    // behind a session: refused, then read once logged in
+    let url = format!("http://{address}");
+    let response = client.get(format!("{url}/version")).send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let logged = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap()
+        .post(format!("{url}/login"))
+        .form(&[("password", "a long enough password")])
+        .send()
+        .await
+        .unwrap();
+    let session = logged.headers()["set-cookie"]
+        .to_str()
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string();
+    let started = client
+        .get(format!("{url}/version"))
+        .header("cookie", session)
+        .send()
+        .await
+        .unwrap()
+        .json::<Version>()
+        .await
+        .unwrap()
+        .version;
     assert!(started.abs_diff(now) < 60_000, "{started} {now}");
 }
 
@@ -259,10 +292,7 @@ async fn serves_the_page() {
     std::fs::write(folder.join("front.wasm"), b"\0asm").unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
-    let router = kraken_dashboard_web::with_page(
-        kraken_dashboard_web::router_with(Shared::new(100, KEY.to_vec())),
-        &folder,
-    );
+    let router = kraken_dashboard_web::app(Shared::new(100, KEY.to_vec()), Some(&folder));
     tokio::spawn(async move { axum::serve(listener, router).await });
 
     let raw = reqwest::Client::builder().no_gzip().build().unwrap();
@@ -339,4 +369,142 @@ async fn takes_the_pushes_of_the_bot_only() {
     );
     assert_eq!(again.send().await.unwrap().status(), StatusCode::CONFLICT);
     assert_eq!(version(&client, &url).await.version, 101);
+}
+
+/// The page and what it reads, with a session only: the password opens one, the pushes of the bot
+/// need none, their signature is theirs
+#[tokio::test]
+async fn reads_with_a_session_only() {
+    use kraken_dashboard_web::auth::{Auth, hash_password};
+
+    let folder =
+        std::env::temp_dir().join(format!("kraken-dashboard-web-login-{}", std::process::id()));
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(folder.join("index.html"), "<html>the desk").unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let shared = Shared::new(100, KEY.to_vec()).with_auth(Auth::new(
+        hash_password("a long enough password").unwrap(),
+        true,
+    ));
+    let router = kraken_dashboard_web::app(shared, Some(&folder));
+    tokio::spawn(async move { axum::serve(listener, router).await });
+    // the redirections read, not followed
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+
+    // no session: the page sends to the login, the routes refuse
+    let page = client.get(format!("{url}/")).send().await.unwrap();
+    assert_eq!(page.status(), StatusCode::SEE_OTHER);
+    assert_eq!(page.headers()["location"], "/login");
+    for route in ["/version", "/data?range=day"] {
+        let response = client.get(format!("{url}{route}")).send().await.unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{route}");
+    }
+    let login = client.get(format!("{url}/login")).send().await.unwrap();
+    assert_eq!(login.status(), StatusCode::OK);
+    let text = login.text().await.unwrap();
+    assert!(text.contains("type=\"password\""), "{text}");
+
+    // the bot pushes all the same, signed
+    let push = put_state(
+        &url,
+        serde_json::to_vec(&push(1, &[("day", None, 10)])).unwrap(),
+    );
+    assert_eq!(push.send().await.unwrap().status(), StatusCode::NO_CONTENT);
+
+    // a wrong password: the page again, told
+    let wrong = client
+        .post(format!("{url}/login"))
+        .form(&[("password", "not the password")])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(wrong.status(), StatusCode::UNAUTHORIZED);
+    assert!(wrong.headers().get("set-cookie").is_none());
+    assert!(wrong.text().await.unwrap().contains("Not the password"));
+
+    // the password: a session, its cookie for the browser only
+    let right = client
+        .post(format!("{url}/login"))
+        .form(&[("password", "a long enough password")])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(right.status(), StatusCode::SEE_OTHER);
+    assert_eq!(right.headers()["location"], "/");
+    let cookie = right.headers()["set-cookie"].to_str().unwrap().to_string();
+    for it in ["kraken_session=", "HttpOnly", "SameSite=Strict", "Secure"] {
+        assert!(cookie.contains(it), "{it}: {cookie}");
+    }
+    let session = cookie.split(';').next().unwrap().to_string();
+    let with = |route: &str| {
+        client
+            .get(format!("{url}{route}"))
+            .header("cookie", session.clone())
+            .send()
+    };
+    assert_eq!(
+        with("/").await.unwrap().text().await.unwrap(),
+        "<html>the desk"
+    );
+    assert_eq!(with("/version").await.unwrap().status(), StatusCode::OK);
+    let data = with("/data?range=day").await.unwrap();
+    assert_eq!(data.status(), StatusCode::OK);
+    // logged in: the login sends to the page
+    assert_eq!(
+        with("/login").await.unwrap().status(),
+        StatusCode::SEE_OTHER
+    );
+
+    // logged out: the session over, the cookie forgotten
+    let out = with("/logout").await.unwrap();
+    assert_eq!(out.status(), StatusCode::SEE_OTHER);
+    assert!(
+        out.headers()["set-cookie"]
+            .to_str()
+            .unwrap()
+            .contains("Max-Age=0")
+    );
+    assert_eq!(
+        with("/version").await.unwrap().status(),
+        StatusCode::UNAUTHORIZED
+    );
+    std::fs::remove_dir_all(folder).unwrap();
+}
+
+/// Too many wrong passwords in a minute: refused, the right one included, without being checked
+#[tokio::test]
+async fn refuses_logins_after_too_many_wrong_passwords() {
+    use kraken_dashboard_web::auth::{Auth, TRIES, hash_password};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let shared = Shared::new(100, KEY.to_vec()).with_auth(Auth::new(
+        hash_password("a long enough password").unwrap(),
+        true,
+    ));
+    let router = kraken_dashboard_web::router_with(shared);
+    tokio::spawn(async move { axum::serve(listener, router).await });
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let log_in = |password: &'static str| {
+        client
+            .post(format!("{url}/login"))
+            .form(&[("password", password)])
+            .send()
+    };
+    for _ in 0..TRIES {
+        assert_eq!(
+            log_in("wrong").await.unwrap().status(),
+            StatusCode::UNAUTHORIZED
+        );
+    }
+    let refused = log_in("a long enough password").await.unwrap();
+    assert_eq!(refused.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert!(refused.text().await.unwrap().contains("wait a minute"));
 }

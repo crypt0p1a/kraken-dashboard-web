@@ -15,7 +15,13 @@ repository = "https://github.com/crypt0p1a/kraken-dashboard-web"
 publish = false
 
 [dependencies]
-axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
+axum = { version = "0.8", default-features = false, features = ["form", "http1", "json", "query", "tokio"] }
+# the password of the dashboard, hashed: argon2id
+argon2 = "0.5"
+# the sessions, at random
+getrandom = "0.2"
+# the password typed to be hashed, never shown
+rpassword = "7"
 # the pushes come compressed, the screens are kept and served so
 flate2 = "1.1"
 # the pushes of the bot, signed: HMAC-SHA256
