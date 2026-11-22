@@ -1,7 +1,12 @@
-//! The DOM backend of ratzilla, its size as it measured it: its own `size` divides the window by a
-//! default cell of 10 by 20 pixels whatever the font, and the dashboard was drawn on a part of the
-//! page only. `window_size` holds the grid it measured, read again after each draw, when it
-//! measures again after a resize: the next frame takes it
+//! The DOM backend of ratzilla, its size as it measured it, and its resizes without a frame of
+//! before. Two things of ratzilla 0.3:
+//!
+//! - its own `size` divides the window by a default cell of 10 by 20 pixels whatever the font: the
+//!   dashboard was drawn on a part of the page only. `window_size` holds the grid it measured
+//! - after a resize, it measures again and makes its grid again when it's next drawn, then draws
+//!   the frame it's given, of the size of before: a cell beyond the new grid, and the page panicked
+//!   (index out of bounds), frozen. So it's first drawn with nothing, which makes its grid again;
+//!   a size changed, the frame of before isn't drawn, the next one is, of the new size
 
 use ratzilla::DomBackend;
 use ratzilla::WebEventHandler;
@@ -30,9 +35,15 @@ impl Backend for Measured {
     where
         I: Iterator<Item = (u16, u16, &'a Cell)>,
     {
-        self.inner.draw(content)?;
-        self.size = self.inner.window_size()?.columns_rows;
-        Ok(())
+        // nothing drawn: the grid made again after a resize, nothing else
+        self.inner.draw(std::iter::empty())?;
+        let size = self.inner.window_size()?.columns_rows;
+        if size != self.size {
+            // a frame of the size of before: ratatui sees the new one at the next, and draws it whole
+            self.size = size;
+            return Ok(());
+        }
+        self.inner.draw(content)
     }
 
     fn hide_cursor(&mut self) -> std::io::Result<()> {
