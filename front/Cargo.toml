@@ -1,0 +1,26 @@
+[package]
+name = "kraken-dashboard-web-front"
+description = "The web page of kraken-dashboard-web: the dashboard of kraken-trading-bot, as the terminal shows it, compiled to WebAssembly"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+license = "MIT"
+publish = false
+
+[dependencies]
+# the dashboard itself, its screen and its logic, without the terminal nor SQLite
+kraken-dashboard = { git = "https://github.com/crypt0p1a/kraken-trading-bot", branch = "dashboard-server", default-features = false }
+kraken-dashboard-data = { git = "https://github.com/crypt0p1a/kraken-trading-bot", branch = "dashboard-server", default-features = false }
+# ratatui in the page, its cells in the DOM
+ratzilla = "0.3.1"
+# ratatui asks for one in WebAssembly: the one of std, a page on a single thread
+critical-section = { version = "1.2", features = ["std"] }
+# what the bot pushed, read from the backend
+gloo-net = { version = "0.6", default-features = false, features = ["http", "json"] }
+gloo-timers = { version = "0.3", features = ["futures"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+# the screen as it was left, kept in the browser; the keys, on the whole page
+web-sys = { version = "0.3", features = ["Document", "EventTarget", "KeyboardEvent", "Storage", "Window"] }

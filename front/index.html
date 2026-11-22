@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>kraken-trading-bot</title>
+    <link data-trunk rel="rust" data-bin="kraken-dashboard-web-front" />
+    <style>
+      html,
+      body {
+        margin: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        /* the background of the desk, as the terminal shows it */
+        background-color: #07090d;
+      }
+      body {
+        /* the monospace fonts of a terminal, braille included for the charts */
+        font-family: Menlo, Monaco, Consolas, "DejaVu Sans Mono", "Liberation Mono", monospace;
+        font-size: 14px;
+      }
+      pre {
+        font-family: inherit;
+        font-size: inherit;
+        margin: 0;
+      }
+    </style>
+  </head>
+  <body>
+    <script>
+      // the keys of the dashboard are its own: never the focus moved, the page scrolled or a search
+      // started by the browser
+      const ours = ["Tab", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "PageUp", "PageDown",
+        "Home", "End", "Enter", "Escape", " ", "/", "'"];
+      document.addEventListener("keydown", (event) => {
+        if (ours.includes(event.key) && !event.metaKey && !event.ctrlKey && !event.altKey) {
+          event.preventDefault();
+        }
+      }, { capture: true });
+    </script>
+  </body>
+</html>
